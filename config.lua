@@ -1,26 +1,55 @@
 Config = {}
 
 -- Enables some printouts.
-Config.Debug = false
+Config.Debug = true
 
-Config.TicketPrice = 1
+Config.TicketPrice = 1 -- charged every time the train leaves the station.
 Config.TrainMaxSpeed = 15.0
 Config.StopDistance = 75
 Config.EaseToStop = 5
 Config.StopSpeed = .25
 Config.UsePassengers = true
+Config.UsePassengersTram = true
 Config.UseTrainBlips = true
 Config.TrainBlipNameEast = "East Line"
 Config.TrainBlipNameWest = "West Line"
-Config.EastTrain = 0x3D72571D -- List can be found at https://alloc8or.re/rdr3/doc/enums/eTrainConfig.txt
-Config.WestTrain = 0x3D72571D -- Stops are custom set for this model.
-Config.Trolley = 0x09B679D6
 Config.StationWaitTime = 60000 -- (1 minute)
 Config.TrainDespawnTimer = 60000 -- (1 minute) while moving
 Config.ProtectTrainDrivers = true
 Config.EnableTram = true
 Config.TramSpawnLocation = vec3(2608.38, -1203.12, 53.16)
+Config.StationNPCRadius = 300 -- used for npc cleanup
 
+-- Values are Train center value, test at riggs.
+-- find the value where the train stops at the riggs platform.
+-- riggs to flatnet, all stop at the same point.
+-- List can be found at https://alloc8or.re/rdr3/doc/enums/eTrainConfig.txt
+Config.EastTrains = {
+    [0x10461E19] = 70.2, -- large passenger train
+    [0x1C043595] = 70.5, -- large passenger train
+    [0x3ADC4DA9] = 70.2, -- large passenger train with beds
+    [0x35D17C43] = 82.74, -- large passenger train and cargo
+    [0xFAB2FFB9] = 72.4, -- large passenger train
+    [0x1C9936BB] = 70.45, -- passenger train with guards
+    [0xCD2C7CA1] = 59, -- passenger train with private rooms
+}
+
+Config.WestTrains = {
+    [0xCA19C62A] = 89, -- long 2 class central train
+    [0x2D3645FA] = 72.45, -- large passenger train
+    [0x4A73E49C] = 72.445, -- large passenger train, lower class
+    [0x4C9CCB22] = 70.45, -- passenger train
+    [0xE16CA3EF] = 70.5, -- passenger train with guards
+}
+
+Config.Trams = {
+    0x73722125,
+    0x90CB53CA,
+    0x9E096E46,
+    0xAEE0ECF5,
+    0xEFBFBDD8,
+    0x09B679D6,
+}
 
 --[[
 Trains do not use native stops. They all stop at station coords with the added offset.
@@ -44,13 +73,13 @@ If you add or remove a location you need to do it for all three. This is done to
 Config.EastStations = {
     ['Flatneck'] = {
         npcModel = 's_m_m_trainstationworker_01',
-        npcCoords = vector4(-335.68, -359.72, 88.07, 126.37),
+        npcCoords = vector4(-335.7726, -361.2146, 88.0802, 55.3916),
         ticketCoords = vector3(-337.29, -360.38, 88.07),
         SpawnBack = vector3(-138.08, -206.63, 95.33),
         SpawnForward = vector3(-555.15, -457.78, 80.72),
         stationCoords = vector3(-340.01, -349.59, 87.83), -- Used to stop the train, put this where you want passengers to board.
-        ForwardOffset = 98.0,  -- Train offset when going forward
-        BackwardOffset = 98.0, -- Train offset when going backward
+        ForwardOffset = 7.5,  -- Train offset when going forward
+        BackwardOffset = 28.5, -- Train offset when going backward
         ForwardStation = { 'Valentine', 'Rhodes'},
         BackwardStation = { 'Riggs' },
     },
@@ -61,8 +90,8 @@ Config.EastStations = {
         SpawnBack = vector3(121.71, 610, 119.09),
         stationCoords = vector3(-164.01, 627.4, 113.51),
         SpawnForward = vector3(-73.77, 411.81, 112.81),
-        ForwardOffset = 94.5,
-        BackwardOffset = 97,
+        ForwardOffset = 24.1,
+        BackwardOffset = 8.8,
         ForwardStation = { 'Emerald' },
         BackwardStation = { 'Flatneck', 'Rhodes' },
         FlipDirectionIf = { 'Rhodes' }, -- This is for going between Rhodes and Valentine, both are backwards to each other but should arrive forward.
@@ -74,8 +103,8 @@ Config.EastStations = {
         SpawnBack = vector3(1398.34, 86.97, 92.31),
         stationCoords = vector3(1529.44, 438.96, 90.22),
         SpawnForward = vector3(1518.09, 604.74, 92.57),
-        ForwardOffset = 96,
-        BackwardOffset = 95.5,
+        ForwardOffset = 9,
+        BackwardOffset = 9.1,
         ForwardStation = { "Saint Denis" },
         BackwardStation = { 'Valentine' },
         SpawnDirectionReverse = true, -- Some tracks have a reverse spawn for some reason, this only affects the spawn.
@@ -87,8 +116,8 @@ Config.EastStations = {
         SpawnBack = vector3(1545.39, -1565.29, 67.93),
         stationCoords = vector3(1225.26, -1309.82, 76.42),
         SpawnForward = vector3(1034.82, -994.45, 67.45),
-        ForwardOffset = 90.0,
-        BackwardOffset = 90.0,
+        ForwardOffset = 0,
+        BackwardOffset = 0,
         ForwardStation = { "Saint Denis" },
         BackwardStation = { 'Valentine', 'Flatneck' },
         FlipDirectionIf = { 'Valentine' },
@@ -100,8 +129,8 @@ Config.EastStations = {
         stationCoords = vector3(2704.32, -1459.04, 45.74),
         SpawnBack = vector3(2897.75, -1202.78, 45.93),
         SpawnForward = vector3(2249.89, -1509.82, 45.77),
-        ForwardOffset = 87.32,
-        BackwardOffset = 75.09,
+        ForwardOffset = 0,
+        BackwardOffset = 0,
         ForwardStation = { 'Annesburg' },
         BackwardStation = { 'Rhodes', 'Emerald' },
     },
@@ -112,20 +141,20 @@ Config.EastStations = {
         SpawnBack = vector3(3109.18, 1536.84, 57.99),
         stationCoords = vector3(2953.54, 1274.98, 43.92),
         SpawnForward = vector3(2900.11, 804.85, 50.6),
-        ForwardOffset = 90.0,
-        BackwardOffset = 102.0,
+        ForwardOffset = 5,
+        BackwardOffset = 10,
         ForwardStation = { 'Bacchus' },
         BackwardStation = { "Saint Denis" },
     },
     ['Bacchus'] = {
         npcModel = 'u_m_o_rigtrainstationworker_01',
-        npcCoords = vector4(581.49, 1682.64, 187.78, 313.04),
-        ticketCoords = vector3(582.25, 1683.68, 187.79),
+        npcCoords = vector4(577.7686, 1677.2504, 187.9282, 306.5589), -- outside vector4(581.49, 1682.64, 187.78, 313.04),
+        ticketCoords = vector3(578.8300, 1678.2676, 187.9282), -- outside vector3(582.25, 1683.68, 187.79),
         SpawnBack = vector3(387.65, 1786.92, 187.53),
         stationCoords = vector3(587.37, 1685.58, 187.52),
         SpawnForward = vector3(807.1, 1602.46, 192.91),
-        ForwardOffset = 89,
-        BackwardOffset = 87,
+        ForwardOffset = -9,
+        BackwardOffset = 5,
         ForwardStation = { 'Wallace' },
         BackwardStation = { 'Annesburg' },
     },
@@ -136,8 +165,8 @@ Config.EastStations = {
         SpawnBack = vector3(-1511.87, 187.46, 104.43),
         stationCoords = vector3(-1309.62, 404.32, 95.02),
         SpawnForward = vector3(-1221.07, 556.99, 93.36),
-        ForwardOffset = 95.5,
-        BackwardOffset = 98,
+        ForwardOffset = 7,
+        BackwardOffset = 9,
         ForwardStation = { 'Riggs' },
         BackwardStation = { 'Bacchus' },
     },
@@ -148,8 +177,8 @@ Config.EastStations = {
         SpawnBack = vector3(-903.51, -630.11, 72.33),
         stationCoords = vector3(-1102.6, -579.41, 81.92),
         SpawnForward = vector3(-1266.7, -425.11, 98.21),
-        ForwardOffset = 89.4,
-        BackwardOffset = 89.4,
+        ForwardOffset = 0.0,
+        BackwardOffset = 0.0,
         ForwardStation = { 'Flatneck' },
         BackwardStation = { 'Wallace' },
     }
@@ -259,8 +288,8 @@ Config.WestStations = {
         stationCoords = vector3(-2499.6445, -2431.6990, 60.2028),
         SpawnBack = vector3(-2806.5178, -2037.0980, 77.7363),
         SpawnForward = vector3(-2022.2163, -2589.6052, 68.4512),
-        ForwardOffset = 89.9,
-        BackwardOffset = 85.0,
+        ForwardOffset = 0.5,
+        BackwardOffset = 0.5,
         ForwardStation = { "Armadillo" },
         BackwardStation = { "Macfarlane" },
         SpawnDirectionReverse = true,
@@ -272,8 +301,8 @@ Config.WestStations = {
         stationCoords = vector3(-3749.28, -2606.64, -13.72),
         SpawnBack = vector3(-3968.1794, -2887.1396, -14.3250),
         SpawnForward = vector3(-3734.6736, -2245.9814, -10.2932),
-        ForwardOffset = 96.0,
-        BackwardOffset = 96.0,
+        ForwardOffset = 5,
+        BackwardOffset = 5,
         ForwardStation = { "Benedict Point" },
         BackwardStation = { 'Macfarlane' },
         SpawnDirectionReverse = true,
@@ -285,8 +314,8 @@ Config.WestStations = {
         stationCoords = vector3(-5235.1777, -3472.4907, -21.2528),
         SpawnBack = vector3(-5362.6768, -3686.9006, -22.3792),
         SpawnForward = vector3(-5233.8848, -3298.8396, -17.1361),
-        ForwardOffset = 85.0,
-        BackwardOffset = 85.0,
+        ForwardOffset = 0,
+        BackwardOffset = 0,
         ForwardStation = { "Armadillo" },
         BackwardStation = { "Armadillo" },
         FlipDirectionIf = { 'Armadillo' },

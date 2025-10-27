@@ -9,13 +9,43 @@ local tramNetId = nil
 local tramConductorNetId = nil
 
 -- Utility: Create tram vehicle and conductor
+local tramPassengers = {}
+
+local function CleanupTramEntities()
+    if tram and DoesEntityExist(tram) then
+        DeleteEntity(tram)
+    end
+    tram = nil
+    if tramConductor and DoesEntityExist(tramConductor) then
+        DeleteEntity(tramConductor)
+    end
+    tramConductor = nil
+    if tramPassengers then
+        for _, ped in ipairs(tramPassengers) do
+            if ped and DoesEntityExist(ped) then
+                DeleteEntity(ped)
+            end
+        end
+    end
+    tramPassengers = {}
+end
+
+AddEventHandler('onResourceStop', function(resource)
+    if resource == GetCurrentResourceName() then
+        CleanupTramEntities()
+    end
+end)
 
 local function CreateTram()
+    tramPassengers = {}
     -- Prevent multiple trams
     local tramModel = Config.Trolley
-    local location = Config.TramSpawnLocation
-    local usePassengers = Config.UsePassengersTram or false
-    -- Request all wagon models for the tram
+    if Config.Trams and type(Config.Trams) == "table" then
+        local keys = {}
+        for hash, _ in pairs(Config.Trams) do table.insert(keys, hash) end
+        if #keys > 0 then tramModel = Config.Trams[math.random(#keys)] end
+    end
+
     local numWagons = Citizen.InvokeNative(0x635423d55ca84fc8, tramModel)
     for i = 0, numWagons - 1 do
         local wagonModel = Citizen.InvokeNative(0x8df5f6a19f99f0d5, tramModel, i)
@@ -25,16 +55,13 @@ local function CreateTram()
         end
     end
     -- Spawn tram
-    tram = Citizen.InvokeNative(0xC239DBD9A57D2A71, tramModel, location, true, usePassengers, true, true)
+    tram = Citizen.InvokeNative(0xC239DBD9A57D2A71, tramModel, Config.TramSpawnLocation, true, Config.UsePassengersTram, false, true)
     SetTrainSpeed(tram, 2.0)
     Citizen.InvokeNative(0x4182C037AA1F0091, tram, true)
     Citizen.InvokeNative(0x8EC47DD4300BF063, tram, 0.0)
 
     -- Network tram entity
     NetworkRegisterEntityAsNetworked(tram)
-    if NetworkDoesNetworkIdExist(NetworkGetNetworkIdFromEntity(tram)) then
-        SetNetworkIdExistsOnAllMachines(NetworkGetNetworkIdFromEntity(tram), true)
-    end
 
     -- Get conductor
     tramConductor = GetPedInVehicleSeat(tram, -1)
@@ -55,15 +82,22 @@ local function CreateTram()
     SetEntityAsMissionEntity(tramConductor, true, true)
     SetEntityCanBeDamaged(tramConductor, false)
 
-    -- Network all passengers (if any)
+    -- Network all passengers (if any) - scan NPCs near spawn and keep those in a train
     local passengerNetIds = {}
-    for seat = 0, 15 do
-        local ped = GetPedInVehicleSeat(tram, seat)
-        if ped and DoesEntityExist(ped) then
-            NetworkRegisterEntityAsNetworked(ped)
-            if NetworkDoesNetworkIdExist(NetworkGetNetworkIdFromEntity(ped)) then
-                SetNetworkIdExistsOnAllMachines(NetworkGetNetworkIdFromEntity(ped), true)
-                table.insert(passengerNetIds, NetworkGetNetworkIdFromEntity(ped))
+    local spawnLocation = Config.TramSpawnLocation
+    local peds = GetGamePool and GetGamePool("CPed") or {}
+    for _, ped in ipairs(peds) do
+        if ped and DoesEntityExist(ped) and not IsPedAPlayer(ped) then
+            local coords = GetEntityCoords(ped)
+            if #(coords - spawnLocation) <= 100.0 then
+                if Citizen.InvokeNative(0x6F972C1AB75A1ED0, ped) then -- IS_PED_IN_ANY_TRAIN
+                    NetworkRegisterEntityAsNetworked(ped)
+                    if NetworkDoesNetworkIdExist(NetworkGetNetworkIdFromEntity(ped)) then
+                        SetNetworkIdExistsOnAllMachines(NetworkGetNetworkIdFromEntity(ped), true)
+                        table.insert(passengerNetIds, NetworkGetNetworkIdFromEntity(ped))
+                    end
+                    table.insert(tramPassengers, ped)
+                end
             end
         end
     end
@@ -96,10 +130,7 @@ function TramDespawnMonitor()
             lastCoords = tramCoords
             if stoppedTime >= abandonTime then
                 -- Despawn tram
-                DeleteEntity(tram)
-                tram = nil
-                DeleteEntity(tramConductor)
-                tramConductor = nil
+                CleanupTramEntities()
                 -- Notify server
                 TriggerServerEvent("Tram:Despawn")
                 -- Respawn tram
@@ -142,14 +173,7 @@ end)
 
 -- Server notifies tram despawned
 RegisterNetEvent("Tram:Despawned", function()
-    if tram and DoesEntityExist(tram) then
-        DeleteEntity(tram)
-        tram = nil
-    end
-    if tramConductor and DoesEntityExist(tramConductor) then
-        DeleteEntity(tramConductor)
-        tramConductor = nil
-    end
+    CleanupTramEntities()
 end)
 
 -- Spawn tram on start and monitor for abandonment
@@ -181,12 +205,7 @@ CreateThread(function()
                     end
                 end
                 if not playersNearby then
-                    DeleteEntity(tram)
-                    tram = nil
-                    if tramConductor and DoesEntityExist(tramConductor) then
-                        DeleteEntity(tramConductor)
-                        tramConductor = nil
-                    end
+                    CleanupTramEntities()
                     TriggerServerEvent("Tram:Despawn")
                 end
             end

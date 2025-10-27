@@ -11,6 +11,8 @@ TriggerEvent('rsg-menubase:getData', function(call)
     MenuData = call
 end)
 
+local trainModel
+
 local activeStation = nil
 local destinationStation = nil
 local activeTrainBlips = {
@@ -23,6 +25,58 @@ local spawnedTrainDrivers = {}
 local spawnedTrainGuards = {}
 local spawnedTrainPassengers = {}
 local spawnedStationNPCs = {}
+
+-- NPC-on-train tracking cache (network-synced entities)
+-- Keyed by trainNetId -> set of ped handles
+local TrainNPCCache = {}
+
+local function GetTrainNetId(entity)
+    local id = NetworkGetNetworkIdFromEntity(entity)
+    if id and id ~= 0 and NetworkDoesNetworkIdExist(id) then
+        return id
+    end
+    return nil
+end
+
+local function AddTrainNPCToCache(trainNetId, ped)
+    if not trainNetId or not ped then return end
+    TrainNPCCache[trainNetId] = TrainNPCCache[trainNetId] or {}
+    TrainNPCCache[trainNetId][ped] = true
+end
+
+
+local function RemovePedFromAllTrainCaches(ped)
+    for tid, map in pairs(TrainNPCCache) do
+        if map[ped] then map[ped] = nil end
+    end
+end
+
+-- Find peds around station and sync them onto the train
+local function findTrainNPCs(trainVeh, stationData)
+    if not trainVeh or not DoesEntityExist(trainVeh) or not stationData or not stationData.stationCoords then return end
+    local stationCoords = stationData.stationCoords
+    local radius = Config.StationNPCRadius
+    local trainNetId = GetTrainNetId(trainVeh)
+    if not trainNetId then return end
+
+    TrainNPCCache[trainNetId] = TrainNPCCache[trainNetId] or {}
+
+    local peds = GetGamePool and GetGamePool('CPed') or {}
+    for _, ped in ipairs(peds) do
+        if DoesEntityExist(ped) and not IsPedAPlayer(ped) then
+            local pc = GetEntityCoords(ped)
+            if #(pc - stationCoords) <= radius then
+                local inAnyTrain = Citizen.InvokeNative(0x6F972C1AB75A1ED0, ped)
+                if inAnyTrain then
+                    AddTrainNPCToCache(trainNetId, ped)
+                    NetworkRegisterEntityAsNetworked(ped)
+                else
+                    RemovePedFromAllTrainCaches(ped)
+                end
+            end
+        end
+    end
+end
 
 -- === Utility Functions ===
 function GetStationIndex(stationName)
@@ -703,7 +757,21 @@ end
 function SpawnTrain(currentStation, destinationStation, trainType)
     trainType = trainType or "east"
     local stations = trainType == "west" and Config.WestStations or Config.EastStations
-    local trainModel = trainType == "west" and Config.WestTrain or Config.EastTrain
+    -- Pick a random train model from Config.<Side>Trains; fallback to single model if list missing
+    if trainType == "west" and Config.WestTrains then
+        local keys = {}
+        for hash, _ in pairs(Config.WestTrains) do table.insert(keys, hash) end
+        if #keys > 0 then trainModel = keys[math.random(#keys)] end
+    else
+        if Config.EastTrains then
+            local keys = {}
+            for hash, _ in pairs(Config.EastTrains) do table.insert(keys, hash) end
+            if #keys > 0 then trainModel = keys[math.random(#keys)] end
+        end
+    end
+    if not trainModel then
+        trainModel = (trainType == "west") and Config.WestTrain or Config.EastTrain
+    end
     local stationData = stations[currentStation]
     if not stationData then return end
     
@@ -796,7 +864,7 @@ function SpawnTrain(currentStation, destinationStation, trainType)
         spawnDirection = not spawnDirection
     end
 
-    local trainVeh = Citizen.InvokeNative(0xC239DBD9A57D2A71, trainModel, spawnCoords, spawnDirection, Config.UsePassengers, true, true)
+    local trainVeh = Citizen.InvokeNative(0xC239DBD9A57D2A71, trainModel, spawnCoords, spawnDirection, Config.UsePassengers, false, true)
 
     if stationData.SpawnDirectionReverse then
         spawnDirection = not spawnDirection
@@ -855,37 +923,6 @@ function SpawnTrain(currentStation, destinationStation, trainType)
             SetEntityCanBeDamaged(trainDriverHandle, false)
         end
     end
-
-    -- Ensure all NPCs on board are networked (driver, guards, passengers)
-    -- Scan all seats in all train cars
-    local trainCars = {}
-    table.insert(trainCars, trainVeh)
-    local carIndex = 0
-    while carIndex < 20 do
-        local trainCar = Citizen.InvokeNative(0x08C2ACB934C70129, trainVeh, carIndex)
-        if trainCar and DoesEntityExist(trainCar) and trainCar ~= trainVeh then
-            table.insert(trainCars, trainCar)
-        else
-            break
-        end
-        carIndex = carIndex + 1
-    end
-
-    for _, car in ipairs(trainCars) do
-        for seat = -1, 15 do
-            local ped = GetPedInVehicleSeat(car, seat)
-            if ped and DoesEntityExist(ped) then
-                SetEntityAsMissionEntity(ped, true, true)
-                NetworkRegisterEntityAsNetworked(ped)
-                if NetworkDoesNetworkIdExist(NetworkGetNetworkIdFromEntity(ped)) then
-                    SetNetworkIdExistsOnAllMachines(NetworkGetNetworkIdFromEntity(ped), true)
-                end
-            end
-        end
-    end
-
-    
-    Wait(5000)
     
     -- Now set the train in motion
     SetTrainSpeed(trainVeh, Config.TrainMaxSpeed)
@@ -912,7 +949,7 @@ function SpawnTrain(currentStation, destinationStation, trainType)
     end
     
     -- Start train monitoring
-    MonitorTrain(trainVeh, currentStation, destinationStation, trainType, spawnDirection)
+    MonitorTrain(trainVeh, currentStation, destinationStation, trainType, spawnDirection, trainModel)
     StartTrainDespawnMonitor(trainVeh, trainType)
 end
 
@@ -922,6 +959,16 @@ function MonitorTrain(trainVeh, current, destinationStation, trainType, spawnDir
     if not trainVeh or not DoesEntityExist(trainVeh) then return end
     trainType = trainType or "east"
     local stations = trainType == "west" and Config.WestStations or Config.EastStations
+
+    local trainOffset = 0
+    if trainType == "east" then
+        trainOffset = Config.EastTrains[trainModel]
+    else
+        trainOffset = Config.WestTrains[trainModel]
+    end
+
+    local npcCheck = false
+    
     CreateThread(function()
         DebugTrainInfo({
             Event = "Train Monitoring Started",
@@ -950,9 +997,9 @@ function MonitorTrain(trainVeh, current, destinationStation, trainType, spawnDir
             local stopPosition = stationData and stationData.stationCoords or nil
             if stationData then
                 if direction then -- backward
-                    offsetValue = stationData.BackwardOffset or 0.0
+                    offsetValue = stationData.BackwardOffset + trainOffset
                 else -- forward
-                    offsetValue = stationData.ForwardOffset or 0.0
+                    offsetValue = stationData.ForwardOffset + trainOffset
                 end
             end
 
@@ -993,6 +1040,12 @@ function MonitorTrain(trainVeh, current, destinationStation, trainType, spawnDir
                 end
 
                 if speed == 0 and distToStop < 10 then
+
+                    if npcCheck == false and Config.UsePassengers then
+                        findTrainNPCs(trainVeh, { stationCoords = stopPosition })
+                        npcCheck = true
+                    end
+
                     DebugTrainInfo({
                         Event = "Station Arrival",
                         ArrivedAt = previousStation,
@@ -1067,6 +1120,7 @@ function MonitorTrain(trainVeh, current, destinationStation, trainType, spawnDir
         end
     end)
 end
+
 
 -- Player-on-train/despawn logic as a separate function
 function StartTrainDespawnMonitor(trainVeh, trainType)
@@ -1215,21 +1269,17 @@ function CleanupTrainLocal(trainVeh)
     end
     
     
-    -- Clean up NPCs from all train cars
-    local npcsRemoved = 0
-    for _, car in ipairs(trainCars) do
-        if DoesEntityExist(car) then
-            -- Remove all passengers and NPCs from this car
-            for seat = -1, 15 do -- Include driver seat (-1) and passenger seats (0-15)
-                local ped = GetPedInVehicleSeat(car, seat)
-                if ped and DoesEntityExist(ped) then
-                    -- Delete the NPC without tracking array management (we'll clear arrays after)
-                    SetEntityAsMissionEntity(ped, true, true)
-                    DeleteEntity(ped)
-                    npcsRemoved = npcsRemoved + 1
-                end
+    -- Clean up NPCs using TrainNPCCache for this train
+    local trainNetId = GetTrainNetId(trainVeh)
+    if trainNetId and TrainNPCCache[trainNetId] then
+        for ped, _ in pairs(TrainNPCCache[trainNetId]) do
+            if DoesEntityExist(ped) then
+                SetEntityAsMissionEntity(ped, true, true)
+                DeleteEntity(ped)
             end
         end
+        -- Clear cache for this train
+        TrainNPCCache[trainNetId] = nil
     end
     
     -- Delete all train cars
@@ -1266,6 +1316,19 @@ AddEventHandler('onResourceStop', function(resourceName)
         end
     end
     
+    -- Clean up NPCs in TrainNPCCache for all trains, then clear the cache
+    for trainNetId, pedSet in pairs(TrainNPCCache) do
+        for ped, _ in pairs(pedSet) do
+            if DoesEntityExist(ped) then
+                SetEntityAsMissionEntity(ped, true, true)
+                DeleteEntity(ped)
+            end
+        end
+        TrainNPCCache[trainNetId] = nil
+    end
+    -- Reset the entire cache table
+    TrainNPCCache = {}
+    
     -- Clean up station NPCs
     local stationNPCsCleanedUp = 0
     for _, npc in ipairs(spawnedStationNPCs) do
@@ -1273,36 +1336,6 @@ AddEventHandler('onResourceStop', function(resourceName)
             SetEntityAsMissionEntity(npc, true, true)
             DeleteEntity(npc)
             stationNPCsCleanedUp = stationNPCsCleanedUp + 1
-        end
-    end
-    
-    -- Clean up any remaining train drivers
-    local driversCleanedUp = 0
-    for _, driver in ipairs(spawnedTrainDrivers) do
-        if driver and DoesEntityExist(driver) then
-            SetEntityAsMissionEntity(driver, true, true)
-            DeleteEntity(driver)
-            driversCleanedUp = driversCleanedUp + 1
-        end
-    end
-    
-    -- Clean up any remaining guards
-    local guardsCleanedUp = 0
-    for _, guard in ipairs(spawnedTrainGuards) do
-        if guard and DoesEntityExist(guard) then
-            SetEntityAsMissionEntity(guard, true, true)
-            DeleteEntity(guard)
-            guardsCleanedUp = guardsCleanedUp + 1
-        end
-    end
-    
-    -- Clean up any remaining passengers
-    local passengersCleanedUp = 0
-    for _, passenger in ipairs(spawnedTrainPassengers) do
-        if passenger and DoesEntityExist(passenger) then
-            SetEntityAsMissionEntity(passenger, true, true)
-            DeleteEntity(passenger)
-            passengersCleanedUp = passengersCleanedUp + 1
         end
     end
     
