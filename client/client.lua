@@ -11,7 +11,15 @@ TriggerEvent('rsg-menubase:getData', function(call)
     MenuData = call
 end)
 
+-- Disable ambient/traffic trains
+CreateThread(function()
+    Wait(1000)
+    Citizen.InvokeNative(0xC77518575DD17953, false)
+end)
+
 local trainModel
+
+local PLAYER_TRAIN_MATCH_RADIUS = (Config and Config.PlayerTrainMatchRadius) or 75.0
 
 local activeStation = nil
 local destinationStation = nil
@@ -19,6 +27,8 @@ local activeTrainBlips = {
     east = nil,
     west = nil
 }
+
+local lastCleanedTrainNetId = nil
 
 local spawnedTrains = {}
 local spawnedTrainDrivers = {}
@@ -49,6 +59,20 @@ local function RemovePedFromAllTrainCaches(ped)
     for tid, map in pairs(TrainNPCCache) do
         if map[ped] then map[ped] = nil end
     end
+end
+
+local function IsPedUsingTrain(ped)
+    return ped and DoesEntityExist(ped) and (IsPedInAnyTrain(ped) ~= false)
+end
+
+local function IsPedAlignedWithTrain(ped, trainVeh, trainCoords)
+    if not ped or not trainVeh or not DoesEntityExist(trainVeh) then return false, nil end
+    if not IsPedUsingTrain(ped) then return false, nil end
+    local coords = GetEntityCoords(ped)
+    if #(coords - trainCoords) <= PLAYER_TRAIN_MATCH_RADIUS then
+        return true, coords
+    end
+    return false, coords
 end
 
 -- Find peds around station and sync them onto the train
@@ -128,28 +152,28 @@ end
 
 
 -- Charge ticket price for any player in the train area (near any train car)
-local function chargeTicketPrice(trainVeh, current)
+local function chargeTicketPrice(trainVeh, current, trainType)
+    local trainNetId = NetworkGetNetworkIdFromEntity(trainVeh)
     -- Get train position and speed for proximity/sync check
     local trainCoords = GetEntityCoords(trainVeh)
     local speed = GetEntitySpeed(trainVeh)
     local heading = GetEntityHeading(trainVeh)
 
-    -- Calculate the vector opposite the train's heading
     local rad = math.rad(heading)
-    local behindVector = vector3(-math.sin(rad), math.cos(rad), 0.0) -- RedM heading is clockwise from North
-    local behindDistance = 30.0 -- Distance behind the train to check (adjust as needed)
+    local behindVector = vector3(-math.sin(rad), math.cos(rad), 0.0)
+    local behindDistance = 30.0
     local behindPoint = trainCoords + behindVector * behindDistance
 
     for _, playerId in ipairs(GetActivePlayers()) do
         local playerPed = GetPlayerPed(playerId)
         if playerPed and DoesEntityExist(playerPed) then
-            if (IsPlayerRidingTrain(playerPed) or IsPedInAnyTrain(playerPed)) and (Citizen.InvokeNative(0x6DE03BCC15E81710, playerPed) == Citizen.InvokeNative(0x6DE03BCC15E81710, trainVeh)) then
+            local onTrain, playerCoords = IsPedAlignedWithTrain(playerPed, trainVeh, trainCoords)
+            if onTrain then
                 local playerSpeed = GetEntitySpeed(playerPed)
-                local playerCoords = GetEntityCoords(playerPed)
+                playerCoords = playerCoords or GetEntityCoords(playerPed)
                 local distBehind = #(playerCoords - behindPoint)
-                if math.abs(playerSpeed - speed) < 3 and distBehind < 150.0 then -- 150.0 is the radius behind, adjust as needed
-                    -- Charge this player by sending their server id
-                    TriggerServerEvent('nt_trains_ticket:server:playerTicketCharge', GetPlayerServerId(playerId), current)
+                if math.abs(playerSpeed - speed) < 3 and distBehind < 150.0 then
+                    TriggerServerEvent('nt_trains_ticket:server:playerTicketCharge', GetPlayerServerId(playerId), current, trainType or 'east', trainNetId)
                 end
             end
         end
@@ -358,7 +382,7 @@ CreateThread(function()
         })
         if stationData.showblip ~= false then
             local StationBlip = BlipAddForCoords(1664425300, stationData.ticketCoords)
-            SetBlipSprite(StationBlip, 103490298, true)
+            SetBlipSprite(StationBlip, 1258184551, true)
             SetBlipScale(StationBlip, 0.2)
             SetBlipName(StationBlip, stationName .. ' Station')
         end
@@ -386,6 +410,8 @@ AddEventHandler('nt_trains_ticket:client:createTrainBlip', function(trainNetId, 
     if not Config.UseTrainBlips then return end
     trainType = trainType or "east" -- Default to east for backward compatibility
     
+    print("^6[BLIP DEBUG] createTrainBlip called for trainType: " .. trainType .. " netId: " .. tostring(trainNetId) .. "^7")
+    
     -- Ensure we have a valid network ID
     if not trainNetId or trainNetId == 0 or not NetworkDoesNetworkIdExist(trainNetId) then
         if Config.Debug then
@@ -410,12 +436,14 @@ AddEventHandler('nt_trains_ticket:client:createTrainBlip', function(trainNetId, 
         end
         
         if not trainVeh or not DoesEntityExist(trainVeh) then
+            print("^1[BLIP DEBUG] Failed to get train entity after timeout^7")
             return
         end
     end
     
     -- Remove existing train blip for this train type if it exists
     if activeTrainBlips[trainType] and DoesBlipExist(activeTrainBlips[trainType]) then
+        print("^3[BLIP DEBUG] Removing old blip for trainType " .. trainType .. "^7")
         RemoveBlip(activeTrainBlips[trainType])
         activeTrainBlips[trainType] = nil
     end
@@ -430,13 +458,9 @@ AddEventHandler('nt_trains_ticket:client:createTrainBlip', function(trainNetId, 
         Citizen.InvokeNative(0x9CB1A1623062F402, activeTrainBlips[trainType], blipName) -- SetBlipName
         SetBlipScale(activeTrainBlips[trainType], 1.0)
         
-        if Config.Debug then
-            print("^2[TRAIN BLIP] Successfully created blip for train: " .. tostring(trainNetId) .. " (Type: " .. trainType .. ")^7")
-        end
+        print("^2[BLIP DEBUG] Successfully created blip for train: " .. tostring(trainNetId) .. " (Type: " .. trainType .. ")^7")
     else
-        if Config.Debug then
-            print("^1[TRAIN BLIP] Failed to create blip for train: " .. tostring(trainNetId) .. " (Type: " .. trainType .. ")^7")
-        end
+        print("^1[BLIP DEBUG] Failed to create blip for train: " .. tostring(trainNetId) .. " (Type: " .. trainType .. ")^7")
     end
 end)
 
@@ -444,9 +468,14 @@ RegisterNetEvent('nt_trains_ticket:client:removeTrainBlip')
 AddEventHandler('nt_trains_ticket:client:removeTrainBlip', function(trainType)
     trainType = trainType or "east" -- Default to east for backward compatibility
     
+    print("^5[BLIP DEBUG] removeTrainBlip event called for trainType: " .. trainType .. "^7")
+    
     if activeTrainBlips[trainType] and DoesBlipExist(activeTrainBlips[trainType]) then
+        print("^5[BLIP DEBUG] Removing blip for trainType: " .. trainType .. "^7")
         RemoveBlip(activeTrainBlips[trainType])
         activeTrainBlips[trainType] = nil
+    else
+        print("^3[BLIP DEBUG] No blip found to remove for trainType: " .. trainType .. " (blip exists: " .. tostring(activeTrainBlips[trainType] ~= nil) .. ", isValid: " .. tostring(activeTrainBlips[trainType] and DoesBlipExist(activeTrainBlips[trainType]) or false) .. ")^7")
     end
 end)
 
@@ -621,37 +650,93 @@ end)
 -- Event to cleanup orphaned trains (when owner disconnects)
 RegisterNetEvent('nt_trains_ticket:client:cleanupOrphanedTrain')
 AddEventHandler('nt_trains_ticket:client:cleanupOrphanedTrain', function(trainType, trainNetId)
-    -- Robust orphaned train cleanup (BGS style)
-    if trainNetId and NetworkDoesNetworkIdExist(trainNetId) then
-        local trainVeh = NetworkGetEntityFromNetworkId(trainNetId)
-        if DoesEntityExist(trainVeh) then
-            CleanupTrain(trainVeh, trainType)
-        end
+    print("^5[BLIP DEBUG] cleanupOrphanedTrain called for trainType: " .. tostring(trainType) .. " netId: " .. tostring(trainNetId) .. "^7")
+    
+    -- Skip if we just cleaned up this exact train locally
+    if trainNetId and trainNetId == lastCleanedTrainNetId then
+        print("^5[BLIP DEBUG] cleanupOrphanedTrain: ABORTING - this train was just cleaned up locally (netId: " .. trainNetId .. ")^7")
+        lastCleanedTrainNetId = nil
+        return
     end
-    -- Also remove any blips if present
-    for trainType, blip in pairs(activeTrainBlips) do
-        if blip and DoesBlipExist(blip) then
-            RemoveBlip(blip)
+    
+    -- If no network ID provided, abort
+    if not trainNetId then
+        print("^5[BLIP DEBUG] cleanupOrphanedTrain: ABORTING - no network ID provided^7")
+        return
+    end
+    
+    -- Check if the entity still exists
+    if not NetworkDoesNetworkIdExist(trainNetId) then
+        -- Network ID doesn't exist - orphaned train is already gone
+        -- DO NOT remove the blip, as it likely belongs to a new train now!
+        print("^5[BLIP DEBUG] cleanupOrphanedTrain: ABORTING - network ID does not exist (train already despawned). PRESERVING BLIP for potential new train^7")
+        return
+    end
+    
+    -- Network ID exists - get the entity and cleanup
+    local trainVeh = NetworkGetEntityFromNetworkId(trainNetId)
+    if trainVeh and DoesEntityExist(trainVeh) then
+        print("^5[BLIP DEBUG] cleanupOrphanedTrain: train entity exists, calling CleanupTrain for trainType: " .. tostring(trainType) .. "^7")
+        CleanupTrain(trainVeh, trainType)
+        
+        -- Only remove the blip if the train entity was valid and we cleaned it up
+        if activeTrainBlips[trainType] and DoesBlipExist(activeTrainBlips[trainType]) then
+            print("^5[BLIP DEBUG] cleanupOrphanedTrain: removing blip for trainType: " .. trainType .. " (train existed)^7")
+            RemoveBlip(activeTrainBlips[trainType])
             activeTrainBlips[trainType] = nil
         end
+    else
+        print("^5[BLIP DEBUG] cleanupOrphanedTrain: train entity does not exist (netId exists but entity is gone)^7")
     end
 end)
 
 
 
 
+RegisterNetEvent('nt_trains_ticket:client:assignTrainMonitor')
+AddEventHandler('nt_trains_ticket:client:assignTrainMonitor', function(trainType, trainNetId, currentStation, destinationStation, direction, model)
+    local trainVeh = nil
+    local timeout = 0
+    if trainNetId and NetworkDoesNetworkIdExist(trainNetId) then
+        trainVeh = NetworkGetEntityFromNetworkId(trainNetId)
+    end
+    while (not trainVeh or not DoesEntityExist(trainVeh)) and timeout < 100 do
+        Wait(100)
+        if trainNetId and NetworkDoesNetworkIdExist(trainNetId) then
+            trainVeh = NetworkGetEntityFromNetworkId(trainNetId)
+        end
+        timeout = timeout + 1
+    end
+    if trainVeh and DoesEntityExist(trainVeh) then
+        if model then trainModel = model end
+        if currentStation and destinationStation ~= nil and direction ~= nil then
+            MonitorTrain(trainVeh, currentStation, destinationStation, trainType or 'east', direction)
+        end
+        StartTrainDespawnMonitor(trainVeh, trainType or 'east')
+    end
+end)
+
 -- === Train Spawning & Monitoring ===
 
 -- Function to clean up a specific train and its components
 function CleanupTrain(trainVeh, trainType)
     if not trainVeh or not DoesEntityExist(trainVeh) then 
+        print("^1[BLIP DEBUG] CleanupTrain called with invalid train^7")
         return 
     end
     
+    print("^1[BLIP DEBUG] CleanupTrain called for trainType: " .. tostring(trainType) .. "^7")
     
-    -- Remove blip first and notify server to release the train type
+    -- Get network ID before cleanup to ensure we clean up the right train
+    local trainNetId = GetTrainNetId(trainVeh)
+    
+    -- Cache this netId so we can skip orphan cleanup if it comes for the same train
+    lastCleanedTrainNetId = trainNetId
+    
+    -- Notify server to release the train type (blip is now managed by despawn monitor)
     if trainType then
-        TriggerServerEvent('nt_trains_ticket:server:removeTrainBlip', trainType)
+        print("^1[BLIP DEBUG] CleanupTrain triggering server removeTrainBlip for trainType: " .. trainType .. " netId: " .. tostring(trainNetId) .. "^7")
+        TriggerServerEvent('nt_trains_ticket:server:removeTrainBlip', trainType, trainNetId)
     end
     
     -- Get all train cars/wagons for comprehensive cleanup
@@ -741,14 +826,6 @@ function CleanupTrain(trainVeh, trainType)
         if train == trainVeh then
             table.remove(spawnedTrains, i)
             break
-        end
-    end
-    
-    -- Remove any active blips if they exist
-    for trainType, blip in pairs(activeTrainBlips) do
-        if blip and DoesBlipExist(blip) then
-            RemoveBlip(blip)
-            activeTrainBlips[trainType] = nil
         end
     end
     
@@ -885,12 +962,6 @@ function SpawnTrain(currentStation, destinationStation, trainType)
     -- Add to local tracking
     table.insert(spawnedTrains, trainVeh)
 
-    -- Initially set train speed to 0 to allow NPCs to get into place
-    SetTrainSpeed(trainVeh, 0.0)
-    SetTrainCruiseSpeed(trainVeh, 0.0)
-    Citizen.InvokeNative(0x9F29999DFDF2AEB8, trainVeh, 0.0)
-    Citizen.InvokeNative(0x4182C037AA1F0091, trainVeh, false)
-    
     -- Ensure train is properly networked
     NetworkRegisterEntityAsNetworked(trainVeh)
     local trainNetId = NetworkGetNetworkIdFromEntity(trainVeh)
@@ -943,8 +1014,11 @@ function SpawnTrain(currentStation, destinationStation, trainType)
         end
         
         if trainNetId and trainNetId ~= 0 and NetworkDoesNetworkIdExist(trainNetId) then
-            -- Update the server with the train's network ID
+            print("^6[BLIP DEBUG] SpawnTrain: requesting blip creation for trainType: " .. trainType .. " netId: " .. trainNetId .. "^7")
             TriggerServerEvent('nt_trains_ticket:server:createTrainBlip', trainNetId, trainType)
+            TriggerServerEvent('nt_trains_ticket:server:registerRoute', trainType, trainNetId, currentStation, destinationStation, spawnDirection, trainModel)
+        else
+            print("^1[BLIP DEBUG] SpawnTrain: failed to get valid network ID after timeout^7")
         end
     end
     
@@ -1054,10 +1128,7 @@ function MonitorTrain(trainVeh, current, destinationStation, trainType, spawnDir
                         Direction = direction and "Backward" or "Forward"
                     })
                     Wait(Config.StationWaitTime)
-                    SetTrainCruiseSpeed(trainVeh, Config.TrainMaxSpeed)
-                    Citizen.InvokeNative(0x787E43477746876F, trainVeh)
 
-                    -- Move to next station in the route
                     DebugTrainInfo({
                         Event = "Moving to Next Station",
                         CurrentStation = previousStation,
@@ -1067,34 +1138,38 @@ function MonitorTrain(trainVeh, current, destinationStation, trainType, spawnDir
                     previousStation = nextStation
                     table.remove(stationList, 1)
 
-                    -- If we've reached the end of the route, try to extend the route automatically
+                    local trainNetIdUpdate = NetworkGetNetworkIdFromEntity(trainVeh)
+                    if trainNetIdUpdate and trainNetIdUpdate ~= 0 and NetworkDoesNetworkIdExist(trainNetIdUpdate) then
+                        TriggerServerEvent('nt_trains_ticket:server:registerRoute', trainType, trainNetIdUpdate, previousStation, destinationStation, direction, trainModel)
+                    end
+
                     if #stationList == 1 then
                         direction = stationList[1].direction
-                        -- Check if we need to flip direction at this junction before finding next station
                         local stations = trainType == "west" and Config.WestStations or Config.EastStations
                         local prevData = stations[stationList[1].station]
                         local nextCandidates = {}
 
-                        if direction == false then -- Forward
+                        if direction == false then
                             if prevData and prevData.ForwardStation then
                                 for _, s in ipairs(prevData.ForwardStation) do table.insert(nextCandidates, s) end
                             end
-                        else -- Backward
+                        else
                             if prevData and prevData.BackwardStation then
                                 for _, s in ipairs(prevData.BackwardStation) do table.insert(nextCandidates, s) end
                             end
                         end
-                        -- Pick the first valid next station (if any)
                         local nextAutoStation = nextCandidates[1]
 
                         if nextAutoStation then
-                            -- Recalculate the route from previousStation to nextAutoStation, using current direction
                             local newRoute = FindShortestRoute(previousStation, nextAutoStation, direction, trainType)
-                            -- Remove the first station (current) since we're already there
                             table.remove(newRoute, 1)
-                            -- Append to stationList
                             for _, step in ipairs(newRoute) do
                                 table.insert(stationList, step)
+                            end
+                            destinationStation = nextAutoStation
+                            local trainNetIdUpdate2 = NetworkGetNetworkIdFromEntity(trainVeh)
+                            if trainNetIdUpdate2 and trainNetIdUpdate2 ~= 0 and NetworkDoesNetworkIdExist(trainNetIdUpdate2) then
+                                TriggerServerEvent('nt_trains_ticket:server:registerRoute', trainType, trainNetIdUpdate2, previousStation, destinationStation, direction, trainModel)
                             end
                             DebugTrainInfo({
                                 Event = "Route Extended",
@@ -1110,11 +1185,19 @@ function MonitorTrain(trainVeh, current, destinationStation, trainType, spawnDir
                         end
                     end
 
+                    if stationList[2] then
+                        SetTrainCruiseSpeed(trainVeh, Config.TrainMaxSpeed)
+                        Citizen.InvokeNative(0x787E43477746876F, trainVeh)
+                    else
+                        SetTrainCruiseSpeed(trainVeh, 0.0)
+                        Citizen.InvokeNative(0x3660BCAB3A6BB734, trainVeh)
+                    end
+
                     trainSetup = false
                     distanceFlip = false
                     Wait(5000) -- Wait before moving to next station
                     
-                    chargeTicketPrice(trainVeh, previousStation)
+                    chargeTicketPrice(trainVeh, previousStation, trainType)
                 end
             end
         end
@@ -1131,14 +1214,44 @@ function StartTrainDespawnMonitor(trainVeh, trainType)
         -- Keep track of whether this train still exists
         local trainExists = true
         
+        -- Store the train's network ID at creation time to prevent cleanup confusion
+        local originalTrainNetId = GetTrainNetId(trainVeh)
+        
         -- Pre-declare variables outside the loop for better performance
         local trainCoords, speed, playersOnTrain
         local playerPed, playerSpeed, playerCoords, dist
         
+        -- Thread to maintain blip visibility while train is active
+        CreateThread(function()
+            print("^6[BLIP DEBUG] Maintenance thread started for trainType: " .. trainType .. " originalNetId: " .. tostring(originalTrainNetId) .. "^7")
+            while trainExists and DoesEntityExist(trainVeh) do
+                Wait(5000)
+                -- Verify this is still the original train (network ID check)
+                local currentNetId = GetTrainNetId(trainVeh)
+                if currentNetId == originalTrainNetId and Config.UseTrainBlips and activeTrainBlips[trainType] then
+                    if not DoesBlipExist(activeTrainBlips[trainType]) then
+                        print("^6[BLIP DEBUG] Maintenance thread: blip missing for trainType " .. trainType .. ", recreating...^7")
+                        local trainNetId = NetworkGetNetworkIdFromEntity(trainVeh)
+                        if trainNetId and trainNetId ~= 0 and NetworkDoesNetworkIdExist(trainNetId) then
+                            activeTrainBlips[trainType] = Citizen.InvokeNative(0x23F74C2FDA6E7C61, 1664425300, trainVeh)
+                            if activeTrainBlips[trainType] and DoesBlipExist(activeTrainBlips[trainType]) then
+                                SetBlipSprite(activeTrainBlips[trainType], -250506368)
+                                local blipName = trainType == "west" and (Config.TrainBlipNameWest or "West Train") or (Config.TrainBlipNameEast or "East Train")
+                                Citizen.InvokeNative(0x9CB1A1623062F402, activeTrainBlips[trainType], blipName)
+                                SetBlipScale(activeTrainBlips[trainType], 1.0)
+                                print("^6[BLIP DEBUG] Maintenance thread: blip recreated successfully for trainType " .. trainType .. "^7")
+                            end
+                        end
+                    end
+                end
+            end
+            print("^6[BLIP DEBUG] Maintenance thread exiting for trainType: " .. trainType .. "^7")
+        end)
+        
+        local hb = 0
         while trainExists and DoesEntityExist(trainVeh) do
             Wait(1000)
             
-            -- If train no longer exists, break out of the loop
             if not DoesEntityExist(trainVeh) then
                 trainExists = false
                 break
@@ -1148,19 +1261,28 @@ function StartTrainDespawnMonitor(trainVeh, trainType)
             speed = GetEntitySpeed(trainVeh)
             playersOnTrain = 0
             
-            -- Check for players on or near the train
             for _, playerId in ipairs(GetActivePlayers()) do
                 playerPed = GetPlayerPed(playerId)
                 if playerPed and DoesEntityExist(playerPed) then
-                    if IsPlayerRidingTrain(playerPed) or IsPedInAnyTrain(playerPed) then
+                    local onTrain, playerCoords = IsPedAlignedWithTrain(playerPed, trainVeh, trainCoords)
+                    if onTrain then
                         playerSpeed = GetEntitySpeed(playerPed)
-                        playerCoords = GetEntityCoords(playerPed)
+                        playerCoords = playerCoords or GetEntityCoords(playerPed)
                         dist = #(playerCoords - trainCoords)
                         if math.abs(playerSpeed - speed) < 0.5 and dist < 150.0 then
                             playersOnTrain = playersOnTrain + 1
                         end
                     end
                 end
+            end
+
+            hb = hb + 1
+            if hb >= 10 then
+                local nid = NetworkGetNetworkIdFromEntity(trainVeh)
+                if nid and nid ~= 0 and NetworkDoesNetworkIdExist(nid) then
+                    TriggerServerEvent('nt_trains_ticket:server:trainHeartbeat', trainType, nid, playersOnTrain)
+                end
+                hb = 0
             end
             
             -- Only start despawn logic after train has stopped at least once
@@ -1174,22 +1296,47 @@ function StartTrainDespawnMonitor(trainVeh, trainType)
                 
                 -- Log progress toward despawn
                 if emptyTrainTimer % 10000 == 0 then
+                    print("^4[BLIP DEBUG] Empty train timer for " .. trainType .. ": " .. emptyTrainTimer .. "ms / " .. Config.TrainDespawnTimer .. "ms^7")
                 end
                 
                 -- If timer exceeds despawn threshold, clean up the train
                 if emptyTrainTimer >= Config.TrainDespawnTimer then
-                    CleanupTrain(trainVeh, trainType)
+                    print("^1[BLIP DEBUG] DESPAWN TIMER TRIGGERED for trainType: " .. trainType .. " - calling CleanupTrain^7")
+                    -- Verify the train is still the same one before cleanup
+                    local currentNetId = GetTrainNetId(trainVeh)
+                    if currentNetId == originalTrainNetId then
+                        CleanupTrain(trainVeh, trainType)
+                    else
+                        print("^1[BLIP DEBUG] Net ID mismatch, not cleaning up. Current: " .. tostring(currentNetId) .. " Original: " .. tostring(originalTrainNetId) .. "^7")
+                    end
                     trainExists = false
-                    return
+                    break
                 end
             else
                 -- Reset timer if conditions aren't met
+                if emptyTrainTimer > 0 then
+                    print("^4[BLIP DEBUG] Resetting empty train timer for " .. trainType .. " (speed: " .. speed .. ", players: " .. playersOnTrain .. ", stoppedOnce: " .. tostring(stoppedOnce) .. ")^7")
+                end
                 emptyTrainTimer = 0
             end
         end
         
-        -- If we exited the loop without cleaning up (train disappeared), make sure to release the train type
-        if trainExists == false and DoesEntityExist(trainVeh) == false then
+        -- Final cleanup when despawn monitor exits (whether by despawn timer or train deletion)
+        print("^1[BLIP DEBUG] Despawn monitor cleanup for trainType: " .. trainType .. " - train exists: " .. tostring(DoesEntityExist(trainVeh)) .. "^7")
+        trainExists = false
+        
+        -- Remove this train's blip
+        if Config.UseTrainBlips and activeTrainBlips[trainType] and DoesBlipExist(activeTrainBlips[trainType]) then
+            print("^1[BLIP DEBUG] Despawn monitor removing blip for trainType: " .. trainType .. "^7")
+            RemoveBlip(activeTrainBlips[trainType])
+            activeTrainBlips[trainType] = nil
+        else
+            print("^3[BLIP DEBUG] Despawn monitor: no blip to remove for trainType: " .. trainType .. " (exists: " .. tostring(activeTrainBlips[trainType] ~= nil) .. ", valid: " .. tostring(activeTrainBlips[trainType] and DoesBlipExist(activeTrainBlips[trainType]) or false) .. ")^7")
+        end
+        
+        -- If train still exists somehow, make sure to release the train type
+        if DoesEntityExist(trainVeh) then
+            print("^1[BLIP DEBUG] Despawn monitor: releasing train type " .. trainType .. "^7")
             TriggerServerEvent('nt_trains_ticket:server:releaseTrainType', trainType)
         end
     end)
