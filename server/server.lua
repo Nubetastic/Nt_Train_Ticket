@@ -72,100 +72,6 @@ AddEventHandler('nt_trains_ticket:server:trainHeartbeat', function(trainType, tr
     end
 end)
 
-CreateThread(function()
-    while true do
-        Wait(30000)
-        local now = GetGameTimer()
-        for netId, info in pairs(trackedTrains) do
-            if now - (info.last or 0) > 60000 then
-                local t = info.type
-                -- Check if train owner is still online before orphaning
-                if t and activeTrains[t] and activeTrains[t].netId == netId then
-                    local ownerOnline = activeTrains[t].owner and isPlayerOnline(activeTrains[t].owner)
-                    
-                    if ownerOnline then
-                        -- Owner is still online - don't orphan
-                        print("[SERVER] Train " .. t .. " (netId: " .. netId .. ") timed out but owner " .. activeTrains[t].owner .. " is still online. Skipping orphan cleanup.")
-                    else
-                        -- Owner is offline - check if entity still exists on any client
-                        print("[SERVER] Train " .. t .. " (netId: " .. netId .. ") orphaned - owner offline. Sending cleanup to one player to verify and cleanup.")
-                        local players = GetPlayers()
-                        if #players > 0 then
-                            local targetPlayer = tonumber(players[1])
-                            TriggerClientEvent('nt_trains_ticket:client:cleanupOrphanedTrain', targetPlayer, t, netId)
-                        else
-                            print("[SERVER] No players online to handle orphan cleanup for train " .. t .. " (netId: " .. netId .. ").")
-                        end
-                    end
-                    
-                    -- Cleanup server-side tracking
-                    activeTrains[t].active = false
-                    activeTrains[t].owner = nil
-                    activeTrains[t].netId = nil
-                    activeTrains[t].candidates = {}
-                    activeTrains[t].route = nil
-                    TriggerClientEvent('nt_trains_ticket:client:removeTrainBlip', -1, t)
-                end
-                trackedTrains[netId] = nil
-            end
-        end
-    end
-end)
-
-local function assignTrainMonitor(trainType, excludeSrc)
-    local data = activeTrains[trainType]
-    if not data or not data.active or not data.netId then return end
-    local newOwner = nil
-    if data.candidates and #data.candidates > 0 then
-        for i, c in ipairs(data.candidates) do
-            if c.id ~= excludeSrc and isPlayerOnline(c.id) then
-                newOwner = c.id
-                table.remove(data.candidates, i)
-                break
-            end
-        end
-    end
-    if not newOwner then
-        for _, pid in ipairs(GetPlayers()) do
-            local id = tonumber(pid)
-            if id and id ~= excludeSrc then
-                newOwner = id
-                break
-            end
-        end
-    end
-    if newOwner then
-        data.owner = newOwner
-        local r = data.route or {}
-        print("[SERVER] Assigning train " .. trainType .. " (netId: " .. data.netId .. ") to replacement owner: " .. newOwner)
-        TriggerClientEvent('nt_trains_ticket:client:assignTrainMonitor', newOwner, trainType, data.netId, r.current, r.destination, r.direction, r.model)
-    else
-        -- No replacement owner found - cleanup the train
-        local netId = data.netId
-        print("[SERVER] No replacement owner found for train " .. trainType .. " (netId: " .. netId .. "). Cleaning up.")
-        
-        -- Only send cleanup to one player if there are any online
-        local players = GetPlayers()
-        if #players > 0 then
-            local targetPlayer = tonumber(players[1])
-            TriggerClientEvent('nt_trains_ticket:client:cleanupOrphanedTrain', targetPlayer, trainType, netId)
-        end
-        
-        data.active = false
-        data.owner = nil
-        data.netId = nil
-        data.candidates = {}
-        data.route = nil
-        TriggerClientEvent('nt_trains_ticket:client:removeTrainBlip', -1, trainType)
-        
-        -- Also clean up from tracked trains so it won't trigger orphan cleanup later
-        if netId then
-            trackedTrains[netId] = nil
-        end
-    end
-end
-
-
 -- Event to check if a train type is available
 RegisterNetEvent('nt_trains_ticket:server:checkTrainAvailable')
 AddEventHandler('nt_trains_ticket:server:checkTrainAvailable', function(trainType)
@@ -237,14 +143,6 @@ end)
 AddEventHandler('onResourceStop', function(resourceName)
     if GetCurrentResourceName() == resourceName then
         for trainType, data in pairs(activeTrains) do
-            if data.active and data.netId then
-                -- Notify one client to clean up orphaned trains during resource stop
-                local players = GetPlayers()
-                if #players > 0 then
-                    local targetPlayer = tonumber(players[1])
-                    TriggerClientEvent('nt_trains_ticket:client:cleanupOrphanedTrain', targetPlayer, trainType, data.netId)
-                end
-            end
             activeTrains[trainType].active = false
             activeTrains[trainType].owner = nil
             activeTrains[trainType].netId = nil
@@ -366,19 +264,13 @@ AddEventHandler('nt_trains_ticket:server:removeTrainBlip', function(trainType, t
     local src = source
     print("[SERVER] Received train blip removal request from player " .. src .. " for trainType: " .. trainType .. " netId: " .. tostring(trainNetId))
     
-    -- Release the train type and notify clients to clean up orphaned train
+    -- Release the train type and notify clients
     if trainType and activeTrains[trainType] then
         -- Only cleanup if the network IDs match (or trainNetId is provided)
         -- This prevents cleaning up a newly spawned train of the same type
         if trainNetId and activeTrains[trainType].netId == trainNetId and activeTrains[trainType].netId then
             print("[SERVER] Train " .. trainType .. " (netId: " .. trainNetId .. ") cleanup confirmed. Sending to one player.")
             
-            -- Send to one player instead of all clients
-            local players = GetPlayers()
-            if #players > 0 then
-                local targetPlayer = tonumber(players[1])
-                TriggerClientEvent('nt_trains_ticket:client:cleanupOrphanedTrain', targetPlayer, trainType, activeTrains[trainType].netId)
-            end
             
             activeTrains[trainType].active = false
             activeTrains[trainType].owner = nil
@@ -393,11 +285,6 @@ AddEventHandler('nt_trains_ticket:server:removeTrainBlip', function(trainType, t
             -- Fallback for older calls without network ID
             print("[SERVER] Train " .. trainType .. " cleanup (legacy, no netId). Sending to one player.")
             
-            local players = GetPlayers()
-            if #players > 0 then
-                local targetPlayer = tonumber(players[1])
-                TriggerClientEvent('nt_trains_ticket:client:cleanupOrphanedTrain', targetPlayer, trainType, activeTrains[trainType].netId)
-            end
             
             activeTrains[trainType].active = false
             activeTrains[trainType].owner = nil

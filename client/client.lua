@@ -647,48 +647,6 @@ AddEventHandler('nt_trains_ticket:client:trainLockResponse', function(trainType,
     end
 end)
 
--- Event to cleanup orphaned trains (when owner disconnects)
-RegisterNetEvent('nt_trains_ticket:client:cleanupOrphanedTrain')
-AddEventHandler('nt_trains_ticket:client:cleanupOrphanedTrain', function(trainType, trainNetId)
-    print("^5[BLIP DEBUG] cleanupOrphanedTrain called for trainType: " .. tostring(trainType) .. " netId: " .. tostring(trainNetId) .. "^7")
-    
-    -- Skip if we just cleaned up this exact train locally
-    if trainNetId and trainNetId == lastCleanedTrainNetId then
-        print("^5[BLIP DEBUG] cleanupOrphanedTrain: ABORTING - this train was just cleaned up locally (netId: " .. trainNetId .. ")^7")
-        lastCleanedTrainNetId = nil
-        return
-    end
-    
-    -- If no network ID provided, abort
-    if not trainNetId then
-        print("^5[BLIP DEBUG] cleanupOrphanedTrain: ABORTING - no network ID provided^7")
-        return
-    end
-    
-    -- Check if the entity still exists
-    if not NetworkDoesNetworkIdExist(trainNetId) then
-        -- Network ID doesn't exist - orphaned train is already gone
-        -- DO NOT remove the blip, as it likely belongs to a new train now!
-        print("^5[BLIP DEBUG] cleanupOrphanedTrain: ABORTING - network ID does not exist (train already despawned). PRESERVING BLIP for potential new train^7")
-        return
-    end
-    
-    -- Network ID exists - get the entity and cleanup
-    local trainVeh = NetworkGetEntityFromNetworkId(trainNetId)
-    if trainVeh and DoesEntityExist(trainVeh) then
-        print("^5[BLIP DEBUG] cleanupOrphanedTrain: train entity exists, calling CleanupTrain for trainType: " .. tostring(trainType) .. "^7")
-        CleanupTrain(trainVeh, trainType)
-        
-        -- Only remove the blip if the train entity was valid and we cleaned it up
-        if activeTrainBlips[trainType] and DoesBlipExist(activeTrainBlips[trainType]) then
-            print("^5[BLIP DEBUG] cleanupOrphanedTrain: removing blip for trainType: " .. trainType .. " (train existed)^7")
-            RemoveBlip(activeTrainBlips[trainType])
-            activeTrainBlips[trainType] = nil
-        end
-    else
-        print("^5[BLIP DEBUG] cleanupOrphanedTrain: train entity does not exist (netId exists but entity is gone)^7")
-    end
-end)
 
 
 
@@ -730,8 +688,6 @@ function CleanupTrain(trainVeh, trainType)
     -- Get network ID before cleanup to ensure we clean up the right train
     local trainNetId = GetTrainNetId(trainVeh)
     
-    -- Cache this netId so we can skip orphan cleanup if it comes for the same train
-    lastCleanedTrainNetId = trainNetId
     
     -- Notify server to release the train type (blip is now managed by despawn monitor)
     if trainType then
